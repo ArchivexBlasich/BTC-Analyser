@@ -12,6 +12,7 @@ ctrlc = "3.4.5"
 ansi_term = "0.12.1"
 reqwest = "0.12.14"
 tokio = { version = "1.44.1", features = ["full"] }
-serde_json = "1.0.140"
 chrono = "0.4.40"
 cli-table = "0.4"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"

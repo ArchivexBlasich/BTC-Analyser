@@ -1,7 +1,8 @@
 use ansi_term::Color::{self, Red};
-use chrono::{NaiveTime};
+use chrono::NaiveTime;
 use clap::Parser;
-use cli_table::{print_stdout, Style, Table, WithTitle};
+use cli_table::{print_stdout, Cell, Style, Table, WithTitle};
+use serde::Deserialize;
 use serde_json::Value;
 
 /// btcAnalyser - A CLI tool to analyze recent Bitcoin transactions.
@@ -18,7 +19,11 @@ struct Cli {
 
     #[arg(short = 'n', long)]
     number_outputs: Option<usize>,
+
+    #[arg(short = 'i', long)]
+    inspect_transcation: Option<String>,
 }
+
 
 #[derive(Debug, Table)]
 struct UndefinedTransaction {
@@ -46,6 +51,34 @@ impl UndefinedTransaction {
     }
 }
 
+
+#[derive(Debug, Deserialize)]
+struct Transaction {
+    inputs: Vec<Input>,
+    out: Vec<Output>,
+    hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Input {
+    prev_out: PrevOut,
+}
+
+#[derive(Debug, Deserialize, Table)]
+struct PrevOut {
+    #[table(title = "Address (input)", color = "cli_table::Color::Blue")]
+    addr: String,
+
+    #[table(title = "Value", color = "cli_table::Color::Blue")]
+    value: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct Output {
+    value: u64,
+    addr: String,
+}
+
 const SATOSHIS_PER_BTC: u32 = 100_000_000;
 
 #[tokio::main]
@@ -64,9 +97,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let unconfirmed_transactions_url =
         "https://blockchain.info/unconfirmed-transactions?format=json";
-    let _inspect_transaction_url = "https://www.blockchain.com/explorer/transactions/btc/";
+    let inspect_transaction_url = "https://blockchain.info/rawtx/";
     let _inspect_address_url = "https://www.blockchain.com/explorer/addresses/btc/";
-    let bitcoin_price_url = "https://api.blockchain.info/stats";
+    let bitcoin_price_url = "https://blockchain.info/rawaddr/";
 
     match cli.exploration_mode.as_deref() {
             // We check if the user specified a number of outputs, by default is 100
@@ -84,17 +117,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             print_stdout(undefined_transaction_vec.with_title().foreground_color(Some(cli_table::Color::Yellow)))?;
 
             // Show the total amount of money that was transfer
-            let mut total = 0.0;
-            for value in &undefined_transaction_vec {
-                total += value.amount_usd;
-            }
-            println!("\n{}{}", Color::Yellow.paint("Total amount: $"), Color::Yellow.paint(total.round().to_string()));
+            let total:f64 = undefined_transaction_vec.iter().map(|ut| ut.amount_usd).sum();
+            let table = vec![
+                vec!["Total Amount".cell(), format!("${}", total.to_string()).cell()]
+            ].table();
+
+            print_stdout(table.foreground_color(Some(cli_table::Color::Magenta)))?;
 
             // exit the program
             std::process::exit(0);
         }
         Some("inspect") => {
-            println!("Inspecting a transaction hash...");
+            if let None = cli.inspect_transcation {
+                println!("{}", Color::Cyan.paint("Provide a transaction hash (i.e -i 136937e5a742645ce873f079f8668aefdc2d06b8172e903d031a8bfb48969450)\n"));
+                help_panel();
+                std::process::exit(1);
+            }
+
+            match inspect_transcation(&cli.inspect_transcation.unwrap(), inspect_transaction_url).await {
+                Ok(transaction) => {
+                    // Extract values from inputs[].prev_out.value
+                    let total_inputs: Vec<&PrevOut> = transaction.inputs.iter().map(|input| &input.prev_out).collect();
+                    let total_input: u64 = total_inputs.iter().map(|prev_output| prev_output.value).sum();
+                    let total_input: f64 = total_input as f64 / SATOSHIS_PER_BTC as f64;
+                    
+                    // Extract values from out[].value
+                    let total_outputs: Vec<&Output> = transaction.out.iter().collect();
+                    let total_output: u64 = total_outputs.iter().map(|output| output.value).sum();
+                    let total_output:f64 = total_output as f64 / SATOSHIS_PER_BTC as f64;
+
+                    // Show Total inputs table
+                    let totals_table = vec![
+                        vec![format!("{} BTC", total_input.to_string()).cell(), format!("{} BTC", total_output.to_string()).cell()]
+                    ]
+                    .table()
+                    .title(vec![
+                        "Total Input".cell(),
+                        "Total Output".cell(),
+                    ])
+                    .bold(true);
+
+                    print_stdout(totals_table.foreground_color(Some(cli_table::Color::Yellow)))?;
+
+
+                    // Show Address inputs and its Value table
+                    let table: Vec<_> = total_inputs.iter().map(|prev_out| {
+                        let btc = prev_out.value as f64 / SATOSHIS_PER_BTC as f64;
+                        vec![prev_out.addr.clone().cell(), format!("{} BTC", btc.to_string()).cell()]
+                    }).collect();
+
+                    let table_inputs = cli_table::Table::table(table)
+                        .title(vec![
+                            "Address (input)".cell(),
+                            "Value".cell()
+                        ])
+                        .foreground_color(Some(cli_table::Color::Green));
+
+                    print_stdout(table_inputs)?;
+                    println!();
+
+                    // Show Address Outputs and its Value table
+                    let table: Vec<_> = total_outputs.iter().map(|output| {
+                        let btc = output.value as f64 / SATOSHIS_PER_BTC as f64;
+                        vec![output.addr.clone().cell(), format!("{} BTC", btc.to_string()).cell()]
+                    }).collect();
+
+                    let table_outputs = cli_table::Table::table(table)
+                        .title(vec![
+                            "Address (output)".cell(),
+                            "Value".cell()
+                        ])
+                        .foreground_color(Some(cli_table::Color::Green));
+
+                    print_stdout(table_outputs)?;
+                },
+                Err(_) => println!("{}",Color::Red.paint("[!] There is not transaction with the hash received")),
+            };
         }
         Some("address") => {
             println!("Inspecting a transaction address...");
@@ -109,7 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn help_panel() {
-    println!("{}", Color::Red.paint("[!] Usage:  ./btcAnalyser -e [-n]"));
+    println!("{}", Color::Red.paint("[!] Usage:  ./btcAnalyser -e [-n] [-i]"));
     println!("{}", Color::Red.paint("---------------------------------------------------------------------------------------------------"));
     println!("\n\t{}", Color::Yellow.paint("[-e] Exploration Mode"));
     println!(
@@ -132,6 +230,12 @@ fn help_panel() {
         "\t\t{}\t{}",
         Color::Purple.paint("Example:"),
         Color::Yellow.paint("./btcAnalyser -e unconfirmed_transactions -n 10")
+    );
+    println!("\n\t{}", Color::Yellow.paint("[-i] Provide the transaction hash"));
+    println!(
+        "\t\t{}\t{}",
+        Color::Purple.paint("Example:"),
+        Color::Yellow.paint("./btcAnalyser -e inspect -i 136937e5a742645ce873f079f8668aefdc2d06b8172e903d031a8bfb48969450")
     );
     println!();
 }
@@ -173,43 +277,66 @@ async fn unconfirmed_transactions(
     let timestamp = chrono::offset::Local::now().time();
 
 
-    // Here we serialize the undefined_transaction JSON
-    // to get hash, value (amount of satoshis) and generate an vector of undefined transactions
-    let parsed: Value = serde_json::from_str(&undefined_transaction_json.as_str())?;
-    let mut undefined_transaction_vec = Vec::new();
+    // Parse the JSON string into a `Value`
+    let parsed: Value = serde_json::from_str(&undefined_transaction_json)?;
 
-    
-    if let Some(txs) = parsed["txs"].as_array() {
-        for (i, tx) in txs.iter().enumerate() {
+    // Extract transactions array
+    let empty_vec:Vec<Value> = Vec::new();
+    let transactions = parsed["txs"].as_array().unwrap_or(&empty_vec);
 
-            if i == number_outputs {
-                break;
-            }
+    // Limit number of transactions
+    let transactions = transactions.iter().take(number_outputs);
 
-            // get the hash transaction
-            let hash = tx["hash"].as_str().unwrap();
 
-            // Calculate the amoun of bitcoin send in the transaction
-            let mut amount_bitcoin = 0;
-            if let Some(outs) = tx["out"].as_array() {
-                for out in outs {
-                    if let Some(value) = out["value"].as_i64() {
-                        amount_bitcoin += value;
-                    }
-                }
-            }
-            let amount_bitcoin = amount_bitcoin as f64 / SATOSHIS_PER_BTC as f64;
+    let undefined_transaction_vec: Vec<UndefinedTransaction> = transactions
+        .map(|tx| {
+            let hash = tx["hash"].as_str().unwrap_or("").to_string();
+
+            // Sum all `value` fields in the `out` array
+            let amount_satoshis: i64 = tx["out"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|out| out["value"].as_i64())
+                .sum();
+
+            // Convert to Bitcoin and calculate USD value
+            let amount_bitcoin = amount_satoshis as f64 / SATOSHIS_PER_BTC as f64;
             let amount_usd = amount_bitcoin * bitcoin_price;
 
-
-            // make a undefined_transaction and push it to the vector
-            undefined_transaction_vec.push(UndefinedTransaction::new(hash.to_string(), amount_bitcoin, amount_usd, timestamp));
-        }
-    }
+            UndefinedTransaction::new(hash, amount_bitcoin, amount_usd, timestamp)
+        })
+        .collect();
 
     Ok(undefined_transaction_vec)
 }
 
+
+async fn inspect_transcation(
+    transaction_hash: &str,
+    inspect_transaction_url: &str,
+) -> Result<Transaction, Box<dyn std::error::Error>> {
+    let inspect_transaction_url = format!("{inspect_transaction_url}{transaction_hash}");
+
+    let inspect_transaction_query = async {
+        let response = reqwest::get(&inspect_transaction_url).await?;
+        
+        if !response.status().is_success() {
+            return Err(Box::<dyn std::error::Error>::from("There is no transaction with the provided hash"));
+        }
+
+        response.text().await.map_err(|e| e.into())
+    };
+
+    let inspect_transaction_json = tokio::join!(inspect_transaction_query);
+
+    
+
+    // Serialize the JSON
+    let transaction: Transaction = serde_json::from_str(&inspect_transaction_json.0?)?;
+
+    Ok(transaction)
+}
 
 
 

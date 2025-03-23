@@ -140,6 +140,7 @@ dependencies = [
  "cli-table",
  "ctrlc",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
 ]
